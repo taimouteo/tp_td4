@@ -3,6 +3,8 @@ import sys
 import os
 from urllib.parse import parse_qs, urlparse
 import qrcode
+import gzip
+import random
 
 '''
 Errores:
@@ -121,11 +123,9 @@ def generar_html_interfaz(modo):
 </html>
 """
 
-
-
 #CODIGO A COMPLETAR
 
-def manejar_descarga(archivo, request_line):
+def manejar_descarga(archivo, request_line, usar_gzip=False, cliente_acepta_gzip=False):
     """
     Genera una respuesta HTTP con el archivo solicitado. 
     Si el archivo no existe debe devolver un error.
@@ -146,21 +146,36 @@ def manejar_descarga(archivo, request_line):
     # Sino, leemos el archivo y lo guardamos
     with open(archivo, "rb") as f:
         contenido = f.read()
+    
+    # Si usamos gzip
+    if usar_gzip and cliente_acepta_gzip:
+        contenido = gzip.compress(contenido)
 
     # Agregamos los headers
-    headers = (
-        "HTTP/1.1 200 OK\r\n"
-        "Content-Type: application/octet-stream\r\n"
-        f"Content-Length: {len(contenido)}\r\n"
-        f"Content-Disposition: attachment; filename=\"{archivo}\"\r\n"
-        "Connection: close\r\n"
-        "\r\n"
-    ).encode()
+        headers = (
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: application/octet-stream\r\n"
+            "Content-Encoding: gzip\r\n"
+            f"Content-Length: {len(contenido)}\r\n"
+            f"Content-Disposition: attachment; filename=\"{archivo}\"\r\n"
+            "Connection: close\r\n"
+            "\r\n"
+        ).encode()
+    
+    else:
+        headers = (
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: application/octet-stream\r\n"
+            f"Content-Length: {len(contenido)}\r\n"
+            f"Content-Disposition: attachment; filename=\"{archivo}\"\r\n"
+            "Connection: close\r\n"
+            "\r\n"
+        ).encode()
 
     return headers + contenido
 
 
-def manejar_carga(body, boundary, directorio_destino="./archivos_servidor"):
+def manejar_carga(body, boundary, directorio_destino="."):
     """
     Procesa un POST con multipart/form-data, guarda el archivo y devuelve una página de confirmación.
     """
@@ -169,11 +184,12 @@ def manejar_carga(body, boundary, directorio_destino="./archivos_servidor"):
         nombre_archivo, contenido = parsear_multipart(body, boundary)
 
         # 2. Guardar archivo
-        ruta = os.path.join(directorio_destino, nombre_archivo)
+        ruta = os.path.join(directorio_destino, "archivos_servidor", nombre_archivo)
+        
         with open(ruta, "wb") as f:
             f.write(contenido)
 
-        # 3. Respuesta 200 OK
+        # 3. Respuesta 200 OK con página de carga exitosa
         html = """
         <html>
         <head>
@@ -209,7 +225,7 @@ def manejar_carga(body, boundary, directorio_destino="./archivos_servidor"):
         """
 
         body = html.encode()
-
+        
         response = (
             b"HTTP/1.1 200 OK\r\n"
             b"Content-Type: text/html\r\n"
@@ -217,6 +233,7 @@ def manejar_carga(body, boundary, directorio_destino="./archivos_servidor"):
             + b"Connection: close\r\n\r\n"
             + body
         )
+
         return response
 
     except Exception as e:
@@ -231,8 +248,10 @@ def manejar_carga(body, boundary, directorio_destino="./archivos_servidor"):
             + mensaje
         )
 
+        print(f"Error en la carga: {e}")
 
-def start_server(archivo_descarga=None, modo_upload=False):
+
+def start_server(archivo_descarga=None, modo_upload=False, usar_gzip=False):
     """
     Inicia el servidor TCP.
     - Si se especifica archivo_descarga, se inicia en modo 'download'.
@@ -242,7 +261,7 @@ def start_server(archivo_descarga=None, modo_upload=False):
     # 1. Obtener IP local y poner al servidor a escuchar en un puerto aleatorio
 
     ip_server = get_wifi_ip()
-    puerto = 2025
+    puerto = random.randint(1025, 10000) # Ponemos como limite 10000 para no complejizar
 
     server_socket = socket(AF_INET, SOCK_STREAM) # IPv4 y TCP
     server_socket.setsockopt(SOL_SOCKET, SO_REUSEADDR, 1) # Saltear el TIME_WAIT de dos minutos para reiniciar más rápido
@@ -277,9 +296,20 @@ def start_server(archivo_descarga=None, modo_upload=False):
         # 2. Recibimos los datos
         request = conn.recv(4096) # Lee el mensaje del cliente (4096 B) y lo guarda
         texto = request.decode(errors="ignore") # Paso el mensaje a string
+        
+        # Si por alguna razón llega un mensaje vacío
+        if not texto:
+            conn.close()
+            continue
+        
+        # Si llegan requests incompletos / favicon
+        if "\r\n\r\n" not in texto:
+            conn.close()
+            continue
+        
         headers_raw, body_inicial = texto.split("\r\n\r\n", 1) # Separo headers del body
         
-        # 3. Decodificamos la solicitud
+        # 3. Decodificamos la solicitud. Armamos un diccionarito con los headers del mensaje
         headers = {}
         lineas = headers_raw.split("\r\n")
         request_line = lineas[0]
@@ -287,22 +317,27 @@ def start_server(archivo_descarga=None, modo_upload=False):
             if ":" in linea:
                 k, v = linea.split(":", 1)
                 headers[k.strip()] = v.strip()
+        
+        # i. Vemos si el cliente acepta gzip en los headers
+        accept_encoding = headers.get("Accept-Encoding", "")
+        cliente_acepta_gzip = "gzip" in accept_encoding
 
-        method, path, version = request_line.split(" ") # "version" no usado pero guardado igualmente
-    
+        method, path, version = request_line.split(" ") # "version" no usado pero guardado igualmente 
+        
         # 4. Determinamos el método, generamos la respuesta acordemente y enviamos
         
         if method == "GET":
-            #   i. Página inicial
+            # i. Página inicial
             if path == "/":
                 html = generar_html_interfaz(sys.argv[1].lower())
+
                 # HTML -> Bytes
                 body = html.encode()
 
-                # Arma headers HTTP
+                # Armado de headers HTTP
                 headers = (
                     "HTTP/1.1 200 OK\r\n"
-                    "Content-Type: text/html; charset=utf-8\r\n"
+                    "Content-Type: text/html\r\n"
                     f"Content-Length: {len(body)}\r\n"
                     "Connection: close\r\n"
                     "\r\n"
@@ -312,10 +347,10 @@ def start_server(archivo_descarga=None, modo_upload=False):
             
             #   ii. Descarga
             elif not modo_upload and path == "/download":
-                resp = manejar_descarga(archivo_descarga, request_line)
+                resp = manejar_descarga(archivo_descarga, request_line, usar_gzip, cliente_acepta_gzip)
                 conn.sendall(resp)
             
-            #   Error
+            #   iii. Error
             else:
                 conn.sendall(b"HTTP/1.1 405 Method Not Allowed\r\n\r\n")
 
@@ -327,9 +362,10 @@ def start_server(archivo_descarga=None, modo_upload=False):
             content_length = int(headers.get("Content-Length", "0"))
 
             # El servidor solo lee los primeros 4096 bytes. Si el mensaje es mayor a eso, no lo lee
-            body_bytes = body_inicial.encode() # Lo que ya llegó
+            # -> Content-Length indica, justamente, el tamaño (largo) en bytes del contenido, entonces
+            body_bytes = body_inicial.encode() # Es lo que ya llegó
 
-            # Si falta, sigue leyendo hasta completar Content-Length
+            # Y, si hace falta, sigue leyendo hasta completar el Content-Length:
             faltan = content_length - len(body_bytes)
 
             while faltan > 0:
@@ -353,19 +389,28 @@ def start_server(archivo_descarga=None, modo_upload=False):
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("Uso:")
-        print("  python tp.py upload                    # Servidor para subir archivos")
-        print("  python tp.py download archivo.txt      # Servidor para descargar un archivo")
+        print("  python tp.py upload [--gzip]                   # Servidor para subir archivos")
+        print("  python tp.py download archivo.txt [--gzip]     # Servidor para descargar un archivo")
         sys.exit(1)
+    
+    comando = sys.argv[1]
+      
+    # Tomamos todo lo que sigue después del comando
+    args = sys.argv[2:]
 
-    comando = sys.argv[1].lower()
+    # Detectamos flag de gzip
+    quiere_gzip = "--gzip" in args
 
     if comando == "upload":
-        start_server(archivo_descarga=None, modo_upload=True)
+        start_server(archivo_descarga=None, modo_upload=True, usar_gzip=quiere_gzip)
 
     elif comando == "download" and len(sys.argv) > 2:
-        archivo = " ".join(sys.argv[2:])
+
+        # El nombre del archivo es la unión de los argumentos sin --gzip
+        archivo = " ".join(a for a in args if a != "--gzip")
+        
         ruta_archivo = os.path.join("archivos_servidor", archivo)
-        start_server(archivo_descarga=ruta_archivo, modo_upload=False)
+        start_server(archivo_descarga=ruta_archivo, modo_upload=False, usar_gzip=quiere_gzip)
 
     else:
         print("Comando no reconocido o archivo faltante")
