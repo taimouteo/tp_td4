@@ -6,23 +6,6 @@ import qrcode
 import gzip
 import random
 
-'''
-Errores:
-- Estaba meme.jpg como variable fija (lo sufrí porque no podía abrir sapardo.webp)
-- En manejar descarga se vuelve a hacer el path hacia la carpeta, pero cuando se
-pasa el nombre del archivo como parámetro ya está hecho (el path queda 
-archivos_servidor/archivos_servidor/nombre) 
-- En start_server, cuando definimos si se hace upload o download, lo hacemos extrayendo
-del mensaje HTTP (si es GET es descarga) y siempre va a ser GET, ya que el mensaje
-HTTP es de cuando nos dan la página del QR. Usamos la variable modo_upload
-- Abrir server tenia bastantes errores. Hubo que recurrir al amiguito.
-- El directorio destino del upload estaba mal.
-
-Añadido:
-- Lee archivos con espacio en el nombre
-- Manda notificacion para volver cuando sube el archivo (chequear)
-'''
-
 #FUNCIONES AUXILIARES
 
 def imprimir_qr_en_terminal(url):
@@ -261,7 +244,7 @@ def start_server(archivo_descarga=None, modo_upload=False, usar_gzip=False):
     # 1. Obtener IP local y poner al servidor a escuchar en un puerto aleatorio
 
     ip_server = get_wifi_ip()
-    puerto = random.randint(1025, 10000) # Ponemos como limite 10000 para no complejizar
+    puerto = random.randint(1024, 8192) # Ponemos como limite 8192 para no complejizar
 
     server_socket = socket(AF_INET, SOCK_STREAM) # IPv4 y TCP
     server_socket.setsockopt(SOL_SOCKET, SO_REUSEADDR, 1) # Saltear el TIME_WAIT de dos minutos para reiniciar más rápido
@@ -309,7 +292,7 @@ def start_server(archivo_descarga=None, modo_upload=False, usar_gzip=False):
         
         headers_raw, body_inicial = texto.split("\r\n\r\n", 1) # Separo headers del body
         
-        # 3. Decodificamos la solicitud. Armamos un diccionarito con los headers del mensaje
+        # 3. Decodificamos la solicitud. Armamos un diccionarito con los headers del mensaje para facilitar
         headers = {}
         lineas = headers_raw.split("\r\n")
         request_line = lineas[0]
