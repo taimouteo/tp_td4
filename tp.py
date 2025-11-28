@@ -259,7 +259,9 @@ def start_server(archivo_descarga=None, modo_upload=False, usar_gzip=False):
     print(f"Servidor escuchando en http://{ip_server}:{puerto}")
 
     #   ii. Imprimo modo de operación
-    print("Operando en modo " + sys.argv[1].lower())
+    if modo_upload: modo="upload" 
+    else: modo="download"
+    print(f"Operando en modo {modo}")
 
     # 3. Esperar conexiones y atender un cliente
     # COMPLETAR:
@@ -276,25 +278,34 @@ def start_server(archivo_descarga=None, modo_upload=False, usar_gzip=False):
         conn, addr = server_socket.accept()
         print("Conexión recibida de", addr)
 
-        # 2. Recibimos los datos
-        request = conn.recv(4096) # Lee el mensaje del cliente (4096 B) y lo guarda
-        texto = request.decode(errors="ignore") # Paso el mensaje a string
+        # 2. Recibimos los datos. Usamos bytes porque habia errores al usar str.
+        request = b""
+
+        while b"\r\n\r\n" not in request:
+            chunk = conn.recv(4096) # Lee 4096 B del mensaje del cliente y lo guarda
+            if not chunk: # Ya se leyó todo el mensaje
+                break
+            request += chunk
         
         # Si por alguna razón llega un mensaje vacío
-        if not texto:
+        if not request:
             conn.close()
             continue
         
         # Si llegan requests incompletos / favicon
-        if "\r\n\r\n" not in texto:
+        if b"\r\n\r\n" not in request:
             conn.close()
             continue
         
-        headers_raw, body_inicial = texto.split("\r\n\r\n", 1) # Separo headers del body
+        # Separamos el msj
+        headers_raw, body_inicial = request.split(b"\r\n\r\n", 1) # Separo headers del body (en bytes)
+
+        # Pasamos a str
+        headers_texto = headers_raw.decode(errors="ignore")
         
         # 3. Decodificamos la solicitud. Armamos un diccionarito con los headers del mensaje para facilitar
         headers = {}
-        lineas = headers_raw.split("\r\n")
+        lineas = headers_texto.split("\r\n")
         request_line = lineas[0]
         for linea in lineas[1:]:
             if ":" in linea:
@@ -312,7 +323,7 @@ def start_server(archivo_descarga=None, modo_upload=False, usar_gzip=False):
         if method == "GET":
             # i. Página inicial
             if path == "/":
-                html = generar_html_interfaz(sys.argv[1].lower())
+                html = generar_html_interfaz(modo)
 
                 # HTML -> Bytes
                 body = html.encode()
@@ -344,21 +355,17 @@ def start_server(archivo_descarga=None, modo_upload=False, usar_gzip=False):
 
             content_length = int(headers.get("Content-Length", "0"))
 
-            # El servidor solo lee los primeros 4096 bytes. Si el mensaje es mayor a eso, no lo lee
-            # -> Content-Length indica, justamente, el tamaño (largo) en bytes del contenido, entonces
-            body_bytes = body_inicial.encode() # Es lo que ya llegó
-
             # Y, si hace falta, sigue leyendo hasta completar el Content-Length:
-            faltan = content_length - len(body_bytes)
+            faltan = content_length - len(body_inicial)
 
             while faltan > 0:
                 chunk = conn.recv(min(4096, faltan))
                 if not chunk:
                     break
-                body_bytes += chunk
+                body_inicial += chunk
                 faltan -= len(chunk)
             
-            response = manejar_carga(body_bytes, boundary)
+            response = manejar_carga(body_inicial, boundary)
             conn.sendall(response)
         
         #   Error
